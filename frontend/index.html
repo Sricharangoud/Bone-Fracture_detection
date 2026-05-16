@@ -4,12 +4,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OsteoScan — Bone Fracture Detection</title>
+  <title>X-Ray Scan Fracture Detection</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link
     href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="./style.css" />
 </head>
 
 <body>
@@ -30,7 +30,7 @@
           <path d="M20 12L20 28M14 16L26 16M14 22L26 22" stroke="currentColor" stroke-width="1.5"
             stroke-linecap="round" />
         </svg>
-        <span class="logo-text">OsteoScan</span>
+        <span class="logo-text">X-Ray Scan Fracture Detection</span>
       </div>
       <p class="tagline">AI-powered X-ray fracture analysis with Grad-CAM localisation</p>
     </header>
@@ -207,7 +207,7 @@
       fd.append("xray", selectedFile);
 
       try {
-        const res = await fetch("/predict", { method: "POST", body: fd });
+        const res = await fetch("http://localhost:5000/predict", { method: "POST", body: fd });
         const data = await res.json();
         if (!res.ok || data.error) {
           showError(data.error || "Analysis failed. Please try again.");

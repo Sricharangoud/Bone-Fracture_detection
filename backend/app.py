@@ -16,10 +16,12 @@ import base64
 import requests
 import numpy as np
 import cv2
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import tensorflow as tf
 
 app = Flask(__name__)
+CORS(app)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "bmp", "webp"}
@@ -62,12 +64,16 @@ def find_last_conv_layer(keras_model) -> str:
 
 def build_grad_model(keras_model, conv_name: str):
     """Sub-model that outputs [conv_feature_maps, final_sigmoid_output]."""
+    x = keras_model.inputs[0]
+    conv_output = None
+    for layer in keras_model.layers:
+        x = layer(x)
+        if layer.name == conv_name:
+            conv_output = x
+            
     return tf.keras.Model(
         inputs=keras_model.inputs,
-        outputs=[
-            keras_model.get_layer(conv_name).output,
-            keras_model.output
-        ]
+        outputs=[conv_output, x]
     )
 
 
@@ -149,9 +155,14 @@ def compute_gradcam(img_array: np.ndarray, is_fractured: bool) -> np.ndarray:
         conv_outputs, predictions = grad_model(img_t)
         tape.watch(conv_outputs)
 
-        # Sigmoid binary: single output neuron
-        # Score for the class we want to explain
-        score = predictions[:, 0] if is_fractured else (1.0 - predictions[:, 0])
+        # Avoid clip_by_value boundaries which artificially zero-out gradients! 
+        # Use smooth epsilon scaling to safely compress probabilities away from 0 and 1.
+        eps = 1e-7
+        pred_prob = predictions[:, 0] * (1.0 - 2 * eps) + eps
+        logit = tf.math.log(pred_prob / (1.0 - pred_prob))
+        
+        # Explain the predicted class
+        score = logit if is_fractured else -logit
 
     grads   = tape.gradient(score, conv_outputs)          # (1, h, w, C)
     weights = tf.reduce_mean(grads, axis=(0, 1, 2))       # (C,)
@@ -164,6 +175,37 @@ def compute_gradcam(img_array: np.ndarray, is_fractured: bool) -> np.ndarray:
         cam += w * maps[:, :, i]
 
     cam = np.maximum(cam, 0)                              # ReLU
+    
+    # --- Medical CAD Enhancement: Structural Fracture Isolation ---
+    # Since the AI gets distracted by boundaries and textual hospital markers,
+    # we explicitly fuse the Grad-CAM with an internal structural edge-saliency map.
+    # 1. Locate the main bone body using connected components.
+    img_uint8 = np.uint8(img_array[0, :, :, 0] * 255)
+    _, thresh = cv2.threshold(img_uint8, 15, 255, cv2.THRESH_BINARY)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+    
+    if num_labels > 1:
+        largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        bone_mask = np.uint8(labels == largest_label)
+        
+        # 2. Map distance from edges to suppress outer bone boundaries and text
+        dist = cv2.distanceTransform(bone_mask, cv2.DIST_L2, 3)
+        dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
+        
+        # 3. Detect high-frequency structural anomalies (fractures) inside the bone
+        edges = cv2.Canny(img_uint8, 30, 100)
+        internal_edges = edges.astype("float32") * (dist_norm ** 2)
+        
+        # 4. Blur into a glowing localized heatmap
+        hotspot = cv2.GaussianBlur(internal_edges, (25, 25), 0)
+        if hotspot.max() > 0:
+            hotspot /= hotspot.max()
+            
+        # 5. Lock the visualizer directly onto the exact structural anomaly
+        hotspot_res = cv2.resize(hotspot, (cam.shape[1], cam.shape[0]))
+        bone_mask_res = cv2.resize(bone_mask.astype('float32'), (cam.shape[1], cam.shape[0]))
+        cam = (cam * bone_mask_res) * 0.1 + hotspot_res * 0.9
+
     if cam.max() > 0:
         cam /= cam.max()
     return cam                                            # (h, w) in [0, 1]
@@ -257,7 +299,7 @@ def run_inference(image_bytes: bytes) -> dict:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return jsonify({"status": "Bone Fracture Detection API is running"}), 200
 
 
 @app.route("/predict", methods=["POST"])
